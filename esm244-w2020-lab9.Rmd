@@ -1,0 +1,231 @@
+---
+title: 'ESM 244: Lab 9'
+author: "Keene Morrow"
+date: "3/4/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+
+library(tidyverse)
+library(here)
+library(janitor)
+library(gt)
+library(boot)
+library(patchwork)
+library(broom)
+library(nlstools)
+
+```
+
+
+### Tables with `gt`
+
+Using built in `LifeCycleSavings` data set
+
+- A little annoying in that three variables are percents. Allison recommends keeping ratio data as decimals and only present as percents for publication
+- Has row names 
+
+First, Data Wrangling
+```{r}
+disp_income <- LifeCycleSavings %>%
+  rownames_to_column() %>%
+  arrange(dpi) %>% # sort low to high dpi
+  head(5) %>% # get only the five lowest dpi countries
+  mutate(ddpi = ddpi / 100, # convert percent to decimal format
+         pop15 = pop15 / 100,
+         pop75 = pop75 / 100)
+```
+
+Now to make a nicer table with `gt`
+
+```{r}
+disp_income %>%
+  gt() %>%
+  tab_header(
+    title = "Life Cycle Savings",
+    subtitle = "5 Countries with Lowest per Capita Disposable Income"
+  ) %>%
+  fmt_currency(
+    columns = vars(dpi),
+    decimals = 2
+  ) %>%
+  fmt_percent(
+    columns = vars(pop15, pop75, ddpi),
+    decimals = 1
+  ) %>%
+  tab_options(
+    table.width = pct(80)
+  ) %>%
+  tab_footnote(
+    footnote = "Data averaged from 1970 - 1980",
+    location = cells_title() # specifies what piece of the table the footnote is associated with
+    ) %>%
+  data_color(
+    columns = vars(dpi),
+    colors = scales::col_numeric(
+      palette = c("orange", "red", "purple"),
+      domain = c(130, 190)
+    )
+  ) %>%
+  cols_label(
+    sr = "Savings Ratio",
+    pop15 = "Pop under 15",
+    pop75 = "Pop over 75"
+  )
+```
+
+
+### Bootstrapping the confidence interval for `salinity` data set from `boot`
+
+Data set only contains 28 observations
+*Is it normally distributed?*
+
+```{r}
+hist(salinity$sal)
+
+ggplot(data = salinity, aes(sample = sal)) +
+  geom_qq()
+
+# If we believed that this sample can describe the sampling distribution...
+t.test(salinity$sal) # Get 95% CI for t-distribution
+
+# But let's use bootstrapping to find a smapling distribution based on the data instead of assumptions
+```
+
+Create a function to caluclate the mean of different bootstrap samples:
+
+```{r}
+mean_fun <- function(x,i) {mean(x[i])}
+
+sal_nc <- salinity$sal # get vector of salinity observations
+
+# set.seed(5002) # makes the randomness reproducable... but don't abuse it
+
+salboot_100 <- boot(data = sal_nc,
+                    statistic = mean_fun,
+                    R = 100)
+
+salboot_10k <- boot(data = sal_nc,
+                    statistic = mean_fun,
+                    R = 10000)
+
+# salboot_mil <- boot(data = sal_nc,
+#                     statistic = mean_fun,
+#                     R = 1000000)
+
+# turn into data frame to plot with ggplot
+salboot_100_df <- data.frame(bs_mean = salboot_100$t)
+
+salboot_10k_df <- data.frame(bs_mean = salboot_10k$t)
+
+# salboot_mil_df <- data.frame(bs_mean = salboot_mil$t)
+
+# plot bootstrapped sampling distribution
+p1 <- ggplot(data = salinity, aes(x = sal)) +
+  geom_histogram()
+
+p2 <- ggplot(data = salboot_100_df, aes(x = bs_mean)) +
+  geom_histogram()
+
+p3 <- ggplot(data = salboot_10k_df, aes(x = bs_mean)) +
+  geom_histogram()
+
+# p4 <- ggplot(data = salboot_mil_df, aes(x = bs_mean)) +
+#   geom_histogram()
+
+
+# Then, in patchwork
+
+p1 + p2 + p3
+
+p1 + p2 / p3
+
+(p1 + p2) / p3
+```
+
+Confidence intervals:
+
+```{r}
+boot.ci(salboot_10k, conf = 0.95)
+```
+
+### Non-linear Least Squares Regression
+
+Example:
+```{r}
+df <- read_csv(here("data", "log_growth.csv"))
+
+ggplot(data = df, aes(x = time, y = pop)) +
+  geom_point()
+
+
+ggplot(data = df, aes(x = time, y = log(pop))) +
+  geom_point()
+```
+
+What is the slope of the log-transformed portion of the plot?
+
+Estimate that the exponential growth phase ends at or around t = 15
+
+```{r}
+df_exp <- df %>%
+  filter(time < 15) %>%
+  mutate(ln_pop = log(pop))
+
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+
+# lm_k
+# estimate growth rate to be ~0.17
+# estimate K to be 180
+# A = 18
+
+df_nls <- nls(pop ~ K/(1 + A*exp(-r*time)),
+              data = df,
+              start = list(K = 180, A = 18, r = 0.17),
+              trace = TRUE) # trace is optional, but cool to see what's happening :)
+
+summary(df_nls)
+
+model_out <- broom::tidy(df_nls) # cleaner model output with broom
+model_out
+
+```
+Model equation:
+$$P(t) = \frac{188.7}{1+138.86e^{-0.35t}}$$
+
+
+
+Make a time sequence to use for prediction with the model
+```{r}
+t_seq <- seq(from = 0, to = 35, length = 200)
+
+```
+Now make some predicitons
+ 
+remember... K, A, and r have predicted values and time is the only variable
+```{r}
+p_predict <- predict(df_nls,
+                     newdata = t_seq)
+
+# bind prediction to original data
+df_complete <- data.frame(df, p_predict)
+
+ggplot(data = df_complete, aes(x = time, y = pop)) +
+  geom_point() +
+  geom_line(aes(x = time, y = p_predict), color = "red") +
+  theme_minimal()
+
+```
+
+Confidence Intervals:
+```{r}
+df_ci <- confint2(df_nls)
+
+df_ci
+
+```
+
